@@ -1,12 +1,12 @@
 from datetime import datetime, timezone
-
+from narrative import build_service_narrative, service_title
 import streamlit as st
 
 from auth import require_login
 from constants import (
+    CHECK_STATE_LABELS,
     ENTRY_TYPE_LABELS,
     POWERTRAIN_LABELS,
-    STATUS_ICONS,
     STATUS_LABELS,
 )
 from nav import show_nav
@@ -15,16 +15,18 @@ from queries import (
     get_checklist_for_stays,
     get_dtcs,
     get_status_log,
+    get_stay_notes,
     get_stays_for_vehicle,
+    get_stay_services,
 )
 from utils import fmt_dt, normalize_vin
 
-st.set_page_config(page_title="Buscar VIN", page_icon="🔎")
+st.set_page_config(page_title="Buscar VIN", page_icon=":material/search:")
 
 require_login()
 show_nav()
 
-st.title("🔎 Historia por VIN")
+st.title("Historia por VIN")
 
 raw_vin = st.text_input(
     "VIN (se usan los últimos 8 caracteres)",
@@ -41,7 +43,11 @@ if vin is None:
 vehicle = find_vehicle(vin)
 if vehicle is None:
     st.info(f"No hay historia para **{vin}**. Se abre al registrar su primer ingreso.")
-    st.page_link("pages/1_Registrar_ingreso.py", label="Registrar ingreso", icon="📝")
+    st.page_link(
+        "pages/1_Registrar_ingreso.py",
+        label="Registrar ingreso",
+        icon=":material/add_circle:",
+    )
     st.stop()
 
 st.subheader(vin)
@@ -63,12 +69,12 @@ ids = [s["id"] for s in stays]
 checklists = get_checklist_for_stays(ids)
 dtcs = get_dtcs(ids)
 logs = get_status_log(ids)
+notes = get_stay_notes(ids)
+services = get_stay_services(ids)
 
 st.metric("Ingresos registrados", len(stays))
 
 now = datetime.now(timezone.utc)
-CHECK_ICONS = {"present": "✅", "missing": "❌", "arrived_later": "✅"}
-CHECK_TEXT = {"present": "Tiene", "missing": "Falta", "arrived_later": "Llegó después"}
 
 
 def show_text(label: str, text: str | None) -> None:
@@ -81,31 +87,33 @@ for i, s in enumerate(stays):
     sid = s["id"]
     title = (
         f"{fmt_dt(s['entered_at'])} · {ENTRY_TYPE_LABELS[s['entry_type']]} · "
-        f"{STATUS_ICONS[s['status']]} {STATUS_LABELS[s['status']]}"
+        f"{STATUS_LABELS[s['status']]}"
     )
     with st.expander(title, expanded=(i == 0)):
         start = datetime.fromisoformat(s["entered_at"])
         end = datetime.fromisoformat(s["exited_at"]) if s.get("exited_at") else now
-        st.write(f"📥 Entrada: {fmt_dt(s['entered_at'])}")
+        st.write(f"Entrada: {fmt_dt(s['entered_at'])}")
         if s.get("exited_at"):
-            st.write(f"📤 Salida: {fmt_dt(s['exited_at'])}")
+            st.write(f"Salida: {fmt_dt(s['exited_at'])}")
         else:
-            st.write("📤 Sigue en el taller")
-        st.write(f"⏱ {(end - start).days} día(s) en taller")
+            st.write("Sigue en el taller")
+        st.write(f"Permanencia: {(end - start).days} día(s)")
 
         if s.get("ot_number"):
-            st.write(f"📋 OT: {s['ot_number']}")
+            st.write(f"OT: {s['ot_number']}")
         if s.get("odometer_km") is not None:
-            st.write(f"🛣 Odómetro: {s['odometer_km']} km")
+            st.write(f"Odómetro: {s['odometer_km']} km")
         if s.get("location"):
-            st.write(f"📍 {s['location']}")
+            st.write(f"Ubicación: {s['location']}")
         battery = []
         if s.get("battery_pct_arrival") is not None:
             battery.append(f"{s['battery_pct_arrival']}%")
         if s.get("battery_km_arrival") is not None:
             battery.append(f"{s['battery_km_arrival']} km")
         if battery:
-            st.write("🔋 Batería al llegar: " + " · ".join(battery))
+            st.write("Batería al llegar: " + " / ".join(battery))
+        if s.get("fuel_arrival"):
+            st.write(f"Combustible al llegar: {s['fuel_arrival']}")
 
         show_text("Estado de llegada", s.get("arrival_condition"))
         show_text("Trabajo solicitado", s.get("requested_work"))
@@ -114,11 +122,13 @@ for i, s in enumerate(stays):
             st.markdown("**Checklist de llegada**")
             for row in checklists[sid]:
                 line = (
-                    f"{CHECK_ICONS[row['state']]} {row['checklist_items']['label']}"
-                    f" — {CHECK_TEXT[row['state']]}"
+                    f"{row['checklist_items']['label']}: "
+                    f"{CHECK_STATE_LABELS[row['state']]}"
                 )
                 if row["state"] == "arrived_later":
                     line += f" ({fmt_dt(row['updated_at'])})"
+                if row.get("note"):
+                    line += f" — {row['note']}"
                 st.write(line)
 
         if dtcs.get(sid):
@@ -133,14 +143,18 @@ for i, s in enumerate(stays):
 
         show_text("Diagnóstico", s.get("diagnosis"))
         show_text("Trabajo realizado", s.get("work_done"))
-        show_text("Notas", s.get("notes"))
+        show_text("Nota de ingreso", s.get("notes"))
+
+        if notes.get(sid):
+            st.markdown("**Notas posteriores**")
+            for nt in notes[sid]:
+                st.write(f"{fmt_dt(nt['created_at'])} — {nt['body']}")
 
         if logs.get(sid):
             st.markdown("**Bitácora de estados**")
             for row in logs[sid]:
                 line = (
                     f"{fmt_dt(row['changed_at'])} — "
-                    f"{STATUS_ICONS.get(row['status'], '')} "
                     f"{STATUS_LABELS.get(row['status'], row['status'])}"
                 )
                 if row.get("note"):

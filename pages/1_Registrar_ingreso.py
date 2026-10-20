@@ -3,9 +3,10 @@ import streamlit as st
 from auth import require_login
 from constants import (
     ENTRY_TYPE_LABELS,
+    FUEL_LEVELS,
     HAS_CHARGE,
+    HAS_FUEL,
     POWERTRAIN_LABELS,
-    STATUS_ICONS,
     STATUS_LABELS,
 )
 from nav import show_nav
@@ -18,12 +19,12 @@ from queries import (
 )
 from utils import normalize_vin
 
-st.set_page_config(page_title="Registrar ingreso", page_icon="📝")
+st.set_page_config(page_title="Registrar ingreso", page_icon=":material/add_circle:")
 
 require_login()
 show_nav()
 
-st.title("📝 Registrar ingreso")
+st.title("Registrar ingreso")
 
 flash = st.session_state.pop("flash", None)
 if flash:
@@ -117,8 +118,10 @@ with st.form(f"entry_form_{suffix}"):
 
     pct = None
     km = None
+    fuel_level = None
+    if powertrain in HAS_CHARGE or powertrain in HAS_FUEL:
+        st.subheader("Energía")
     if powertrain in HAS_CHARGE:
-        st.subheader("Carga de batería")
         b1, b2 = st.columns(2)
         pct = b1.number_input(
             "Carga (%)", min_value=0, max_value=100, value=None, step=1, key=f"pct_{suffix}"
@@ -126,11 +129,19 @@ with st.form(f"entry_form_{suffix}"):
         km = b2.number_input(
             "Autonomía (km)", min_value=0, value=None, step=1, key=f"km_{suffix}"
         )
+    if powertrain in HAS_FUEL:
+        fuel_level = st.radio(
+            "Combustible (tanque)",
+            options=FUEL_LEVELS,
+            index=None,
+            horizontal=True,
+            key=f"fuel_{suffix}",
+        )
 
     status = st.selectbox(
         "Estado inicial",
         options=initial_statuses,
-        format_func=lambda k: f"{STATUS_ICONS[k]} {STATUS_LABELS[k]}",
+        format_func=STATUS_LABELS.get,
         key=f"status_{suffix}",
     )
     location = st.text_input("Ubicación actual (opcional)", key=f"loc_{suffix}")
@@ -171,6 +182,7 @@ if submitted:
             location=location.strip(),
             battery_pct=pct,
             battery_km=km,
+            fuel_level=fuel_level,
             notes=notes.strip(),
             checklist=checklist,
         )

@@ -1,5 +1,6 @@
 from db import get_client
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import streamlit as st
 
 def get_open_stays() -> list[dict]:
     """Estancias abiertas (autos que siguen en el taller), con datos del vehículo."""
@@ -79,6 +80,7 @@ def register_entry(
     location: str,
     battery_pct: int | None,
     battery_km: int | None,
+    fuel_level: str | None,
     notes: str,
     checklist: dict[int, str],
 ) -> int:
@@ -114,6 +116,8 @@ def register_entry(
                 "battery_pct_current": battery_pct,
                 "battery_km_arrival": battery_km,
                 "battery_km_current": battery_km,
+                "fuel_arrival": fuel_level,
+                "fuel_current": fuel_level,
                 "odometer_km": odometer_km,
                 "arrival_condition": arrival_condition or None,
                 "ot_number": ot_number or None,
@@ -274,7 +278,7 @@ def get_checklist_for_stays(stay_ids: list[int]) -> dict[int, list[dict]]:
     result = (
         get_client()
         .table("stay_checklist")
-        .select("stay_id, state, updated_at, checklist_items(label, sort_order)")
+        .select("id, stay_id, state, note, updated_at, checklist_items(label, sort_order)")
         .in_("stay_id", stay_ids)
         .execute()
     )
@@ -301,3 +305,211 @@ def get_status_log(stay_ids: list[int]) -> dict[int, list[dict]]:
     for row in result.data:
         out.setdefault(row["stay_id"], []).append(row)
     return out
+
+
+def update_energy(stay_id: int, values: dict) -> None:
+    """Actualiza batería y/o combustible actuales."""
+    get_client().table("stays").update(values).eq("id", stay_id).execute()
+
+
+def add_note(stay_id: int, body: str) -> None:
+    get_client().table("stay_notes").insert({"stay_id": stay_id, "body": body}).execute()
+
+
+def get_stay_notes(stay_ids: list[int]) -> dict[int, list[dict]]:
+    if not stay_ids:
+        return {}
+    result = (
+        get_client()
+        .table("stay_notes")
+        .select("*")
+        .in_("stay_id", stay_ids)
+        .order("created_at")
+        .execute()
+    )
+    out: dict[int, list[dict]] = {}
+    for row in result.data:
+        out.setdefault(row["stay_id"], []).append(row)
+    return out
+
+
+def save_checklist(stay_id: int, updates: list[dict]) -> str | None:
+    """Guarda cambios del checklist. Devuelve 'ready' o 'reverted' si cambió el estado solo."""
+    client = get_client()
+
+    before = (
+        client.table("stay_checklist").select("state").eq("stay_id", stay_id).execute().data
+    )
+    had_missing = any(r["state"] == "missing" for r in before)
+
+    now = datetime.now(timezone.utc).isoformat()
+    for u in updates:
+        client.table("stay_checklist").update(
+            {"state": u["state"], "note": u["note"] or None, "updated_at": now}
+        ).eq("id", u["id"]).execute()
+
+    after = (
+        client.table("stay_checklist").select("state").eq("stay_id", stay_id).execute().data
+    )
+    has_missing = any(r["state"] == "missing" for r in after)
+
+    stay = (
+        client.table("stays")
+        .select("status, entry_type")
+        .eq("id", stay_id)
+        .limit(1)
+        .execute()
+        .data[0]
+    )
+    if stay["entry_type"] != "PDI":
+        return None
+
+    # Se completó el último faltante: pasa solo a "Lista para entrega"
+    if had_missing and not has_missing and stay["status"] == "in_workshop":
+        update_status(stay_id, "ready_for_delivery", "Checklist de llegada completo")
+        return "ready"
+
+    # Volvió a faltar algo: regresa a "En taller"
+    if has_missing and stay["status"] == "ready_for_delivery":
+        update_status(stay_id, "in_workshop", "Checklist con faltantes")
+        return "reverted"
+
+    return None
+
+
+def get_recent_exits(days: int = 7) -> list[dict]:
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    result = (
+        get_client()
+        .table("stays")
+        .select("id, entry_type, exited_at, vehicles(vin, model)")
+        .gte("exited_at", since)
+        .order("exited_at", desc=True)
+        .execute()
+    )
+    return result.data
+
+
+def revert_exit(stay_id: int) -> str | None:
+    """Deshace una salida registrada por error. Devuelve un mensaje de error o None."""
+    client = get_client()
+
+    stay = (
+        client.table("stays").select("vehicle_id").eq("id", stay_id).limit(1).execute().data[0]
+    )
+    if has_open_stay(stay["vehicle_id"]):
+        return "Este vehículo ya tiene otro ingreso abierto."
+
+    log = (
+        client.table("status_log")
+        .select("status")
+        .eq("stay_id", stay_id)
+        .order("changed_at", desc=True)
+        .execute()
+        .data
+    )
+    previous = next((r["status"] for r in log if r["status"] != "delivered"), "in_workshop")
+
+    client.table("stays").update({"status": previous, "exited_at": None}).eq(
+        "id", stay_id
+    ).execute()
+    client.table("status_log").insert(
+        {
+            "stay_id": stay_id,
+            "status": previous,
+            "note": "Salida revertida (registrada por error)",
+        }
+    ).execute()
+    return None
+
+@st.cache_data(ttl=120)
+def get_templates_with_tasks() -> list[dict]:
+    """Servicios del catálogo con sus tareas (en caché para no consultar por cada auto)."""
+    templates = (
+        get_client()
+        .table("service_templates")
+        .select("*, service_template_tasks(*)")
+        .order("sort_order")
+        .order("name")
+        .execute()
+        .data
+    )
+    for t in templates:
+        t["tasks"] = sorted(
+            t.pop("service_template_tasks"), key=lambda x: (x["sort_order"], x["id"])
+        )
+    return templates
+
+
+def create_template(name: str) -> None:
+    get_client().table("service_templates").insert(
+        {"name": name, "sort_order": 100}
+    ).execute()
+    get_templates_with_tasks.clear()
+
+
+def save_template_tasks(template_id: int, tasks: list[dict]) -> None:
+    """Reemplaza las tareas de un servicio. Inserta primero y borra las viejas después."""
+    client = get_client()
+    old = (
+        client.table("service_template_tasks")
+        .select("id")
+        .eq("template_id", template_id)
+        .execute()
+        .data
+    )
+    if tasks:
+        client.table("service_template_tasks").insert(
+            [{**t, "template_id": template_id} for t in tasks]
+        ).execute()
+    old_ids = [r["id"] for r in old]
+    if old_ids:
+        client.table("service_template_tasks").delete().in_("id", old_ids).execute()
+    get_templates_with_tasks.clear()
+
+
+def get_stay_services(stay_ids: list[int]) -> dict[int, list[dict]]:
+    if not stay_ids:
+        return {}
+    result = (
+        get_client()
+        .table("stay_services")
+        .select("*, stay_service_tasks(*)")
+        .in_("stay_id", stay_ids)
+        .order("created_at")
+        .execute()
+    )
+    out: dict[int, list[dict]] = {}
+    for row in result.data:
+        row["tasks"] = sorted(
+            row.pop("stay_service_tasks"), key=lambda t: (t["sort_order"], t["id"])
+        )
+        out.setdefault(row["stay_id"], []).append(row)
+    return out
+
+
+def record_service(
+    stay_id: int, template_name: str, interval_km: int | None, tasks: list[dict]
+) -> int:
+    client = get_client()
+    service = (
+        client.table("stay_services")
+        .insert(
+            {
+                "stay_id": stay_id,
+                "template_name": template_name,
+                "interval_km": interval_km,
+            }
+        )
+        .execute()
+        .data[0]
+    )
+    if tasks:
+        client.table("stay_service_tasks").insert(
+            [{**t, "service_id": service["id"]} for t in tasks]
+        ).execute()
+    return service["id"]
+
+
+def delete_service(service_id: int) -> None:
+    get_client().table("stay_services").delete().eq("id", service_id).execute()
