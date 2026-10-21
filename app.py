@@ -35,7 +35,7 @@ from queries import (
     update_status,
     get_templates_with_tasks,
     get_stay_services,
-
+    lookup_vins,
 )
 from utils import fmt_dt
 
