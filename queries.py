@@ -513,3 +513,50 @@ def record_service(
 
 def delete_service(service_id: int) -> None:
     get_client().table("stay_services").delete().eq("id", service_id).execute()
+
+
+def lookup_vins(tokens: list[str], contains: bool = False) -> dict[str, list[dict]]:
+    """Por cada dato (VIN o últimos dígitos), los vehículos que coinciden con su último ingreso."""
+    tokens = list(dict.fromkeys(t for t in tokens if t))
+    if not tokens:
+        return {}
+    client = get_client()
+
+    vehicles: dict[int, dict] = {}
+    for i in range(0, len(tokens), 40):
+        chunk = tokens[i : i + 40]
+        pattern = ",".join(
+            f"vin.ilike.*{t}*" if contains else f"vin.ilike.*{t}" for t in chunk
+        )
+        rows = (
+            client.table("vehicles")
+            .select("id, vin, model, powertrain")
+            .or_(pattern)
+            .execute()
+            .data
+        )
+        for v in rows:
+            vehicles[v["id"]] = v
+
+    latest: dict[int, dict] = {}
+    ids = list(vehicles)
+    for i in range(0, len(ids), 100):
+        rows = (
+            client.table("stays")
+            .select("id, vehicle_id, entry_type, status, location, entered_at, exited_at")
+            .in_("vehicle_id", ids[i : i + 100])
+            .order("entered_at", desc=True)
+            .execute()
+            .data
+        )
+        for s in rows:
+            latest.setdefault(s["vehicle_id"], s)
+
+    out: dict[str, list[dict]] = {}
+    for t in tokens:
+        out[t] = [
+            {**v, "stay": latest.get(v["id"])}
+            for v in vehicles.values()
+            if (t in v["vin"] if contains else v["vin"].endswith(t))
+        ]
+    return out

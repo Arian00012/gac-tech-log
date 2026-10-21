@@ -1,11 +1,19 @@
 import streamlit as st
 
+LINKS = [
+    ("app.py", "Taller", ":material/directions_car:"),
+    ("pages/1_Registrar_ingreso.py", "Ingreso", ":material/add_circle:"),
+    ("pages/2_Buscar_VIN.py", "Buscar", ":material/search:"),
+    ("pages/4_Verificar_lista.py", "Verificar", ":material/fact_check:"),
+    ("pages/3_Catalogo.py", "Catálogo", ":material/checklist:"),
+]
+
 
 def show_nav() -> None:
-    c1, c2, c3, c4 = st.columns(4)
-    c1.page_link("app.py", label="Taller", icon=":material/directions_car:")
-    c2.page_link(
-        "pages/1_Registrar_ingreso.py", label="Ingreso", icon=":material/add_circle:"
-    )
-    c3.page_link("pages/2_Buscar_VIN.py", label="Buscar", icon=":material/search:")
-    c4.page_link("pages/3_Catalogo.py", label="Catálogo", icon=":material/checklist:")
+    try:
+        box = st.container(horizontal=True)
+    except TypeError:  # Streamlit antiguo: se apila en vertical
+        box = st.container()
+    with box:
+        for path, label, icon in LINKS:
+            st.page_link(path, label=label, icon=icon)

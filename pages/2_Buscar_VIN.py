@@ -141,6 +141,10 @@ for i, s in enumerate(stays):
                     line += f" ({d['note']})"
                 st.markdown(line)
 
+        for svc in services.get(sid, []):
+            st.markdown(f"**{service_title(svc)}**")
+            st.write(build_service_narrative(vin, svc, s))
+
         show_text("Diagnóstico", s.get("diagnosis"))
         show_text("Trabajo realizado", s.get("work_done"))
         show_text("Nota de ingreso", s.get("notes"))

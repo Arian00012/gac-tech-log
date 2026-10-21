@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 from narrative import service_title
 from service_ui import render_service_tab
 import streamlit as st
+import re
+from ui import stat_cards
 
 from auth import require_login
 from constants import (
@@ -100,17 +102,30 @@ templates = get_templates_with_tasks()
 to_send = [s for s in stays if s["status"] == "to_bodyshop"]
 at_shop = [s for s in stays if s["status"] == "at_bodyshop"]
 
-m1, m2, m3 = st.columns(3)
-m1.metric("En taller", len(stays))
-m2.metric("Por enviar", len(to_send))
-m3.metric("En chapero", len(at_shop))
+ready = [s for s in stays if s["status"] == "ready_for_delivery"]
+waiting = [s for s in stays if s["status"] == "waiting_part"]
+
+stat_cards(
+    [
+        ("En taller", len(stays)),
+        ("Listos para entrega", len(ready)),
+        ("Esperando repuesto", len(waiting)),
+        ("Por enviar al chapero", len(to_send)),
+        ("En chapero", len(at_shop)),
+    ]
+)
 
 if to_send:
     st.caption("Por enviar al chapero: " + ", ".join(s["vehicles"]["vin"] for s in to_send))
 if at_shop:
     st.caption("En chapero: " + ", ".join(s["vehicles"]["vin"] for s in at_shop))
 
-# Filtro por estado
+# Búsqueda rápida y filtro por estado
+search_raw = st.text_input(
+    "Buscar vehículo", placeholder="Últimos dígitos del VIN, por ejemplo 3031"
+)
+query = re.sub(r"[^A-Za-z0-9]", "", search_raw).upper()
+
 counts: dict[str, int] = {}
 for s in stays:
     counts[s["status"]] = counts.get(s["status"], 0) + 1
@@ -122,7 +137,27 @@ selected = st.pills(
     selection_mode="multi",
 )
 
-visible = [s for s in stays if not selected or s["status"] in selected]
+if query:
+    visible = [s for s in stays if query in s["vehicles"]["vin"]]
+else:
+    visible = [s for s in stays if not selected or s["status"] in selected]
+
+if query and not visible:
+    st.info(f"Ningún vehículo en el taller coincide con {query}.")
+    history = lookup_vins([query], contains=True).get(query, [])
+    if not history:
+        st.caption("Tampoco hay registros anteriores con esos dígitos.")
+    for h in history[:5]:
+        stay = h["stay"]
+        if stay and stay.get("exited_at"):
+            st.write(
+                f"{h['vin']}: salió el {fmt_dt(stay['exited_at'])} "
+                f"({ENTRY_TYPE_LABELS[stay['entry_type']]})"
+            )
+        else:
+            st.write(f"{h['vin']}: sin ingresos registrados")
+    show_recent_exits()
+    st.stop()
 now = datetime.now(timezone.utc)
 
 for s in visible:
